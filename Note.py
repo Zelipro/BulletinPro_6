@@ -5,14 +5,149 @@ import os
 import shutil
 from pathlib import Path
 from time import sleep
-from db_manager import get_db_connection
+import threading
+import socket
+from datetime import datetime
 from db_manager import get_db_connection, db_manager, init_all_tables
+from sync_manager import sync_manager
+
+# ==================== GESTIONNAIRE DE CONNEXION & SYNC ====================
+
+class SmartSyncManager:
+    """Gestionnaire intelligent de synchronisation avec gestion hors ligne"""
+    
+    def __init__(self):
+        self.is_online = False
+        self.pending_syncs = []  # File d'attente des syncs en attente
+        self.sync_lock = threading.Lock()
+        self.check_connection()
+    
+    def check_connection(self):
+        """Vérifie si Internet est disponible"""
+        try:
+            # Tente de se connecter à Google DNS
+            socket.create_connection(("8.8.8.8", 53), timeout=3)
+            self.is_online = True
+            return True
+        except OSError:
+            self.is_online = False
+            return False
+    
+    def add_pending_sync(self, table_name, filter_col, filter_val, operation_type="upsert"):
+        """Ajoute une opération de sync à la file d'attente"""
+        with self.sync_lock:
+            sync_task = {
+                "table": table_name,
+                "filter_col": filter_col,
+                "filter_val": filter_val,
+                "operation": operation_type,
+                "timestamp": datetime.now().isoformat()
+            }
+            self.pending_syncs.append(sync_task)
+            print(f"📋 Sync ajoutée en file d'attente: {table_name}")
+    
+    def execute_pending_syncs(self, callback=None):
+        """Exécute toutes les syncs en attente"""
+        if not self.check_connection():
+            print("❌ Pas de connexion - Impossible de synchroniser")
+            return False
+        
+        with self.sync_lock:
+            if not self.pending_syncs:
+                print("✅ Aucune sync en attente")
+                return True
+            
+            total = len(self.pending_syncs)
+            success_count = 0
+            failed_syncs = []
+            
+            for idx, sync_task in enumerate(self.pending_syncs):
+                try:
+                    if callback:
+                        callback(f"Sync {idx+1}/{total}...")
+                    
+                    sync_manager.sync_table_to_supabase(
+                        sync_task["table"],
+                        filter_col=sync_task["filter_col"],
+                        filter_val=sync_task["filter_val"]
+                    )
+                    success_count += 1
+                    print(f"✅ Sync réussie: {sync_task['table']}")
+                    
+                except Exception as e:
+                    print(f"❌ Échec sync {sync_task['table']}: {e}")
+                    failed_syncs.append(sync_task)
+            
+            # Garder uniquement les syncs échouées
+            self.pending_syncs = failed_syncs
+            
+            print(f"✅ Synchronisation: {success_count}/{total} réussies")
+            return success_count > 0
+    
+    def sync_now(self, table_name, filter_col, filter_val, callback_success=None, callback_error=None):
+        """Tente de synchroniser immédiatement, sinon met en attente"""
+        
+        if not self.check_connection():
+            print(f"🔴 Hors ligne - Sync différée pour {table_name}")
+            self.add_pending_sync(table_name, filter_col, filter_val)
+            if callback_error:
+                callback_error("Hors ligne - Données enregistrées localement")
+            return False
+        
+        try:
+            print(f"🔄 Synchronisation en ligne de {table_name}...")
+            sync_manager.sync_table_to_supabase(
+                table_name,
+                filter_col=filter_col,
+                filter_val=filter_val
+            )
+            print(f"✅ Sync réussie: {table_name}")
+            if callback_success:
+                callback_success()
+            return True
+            
+        except Exception as e:
+            print(f"❌ Erreur sync {table_name}: {e}")
+            # En cas d'erreur, mettre en attente
+            self.add_pending_sync(table_name, filter_col, filter_val)
+            if callback_error:
+                callback_error(f"Erreur sync: {str(e)}")
+            return False
+    
+    def get_sync_status(self):
+        """Retourne le statut de synchronisation"""
+        if not self.check_connection():
+            pending_count = len(self.pending_syncs)
+            return {
+                "status": "offline",
+                "icon": "🔴",
+                "message": f"Hors ligne ({pending_count} sync en attente)" if pending_count > 0 else "Hors ligne",
+                "color": ft.Colors.RED
+            }
+        elif len(self.pending_syncs) > 0:
+            return {
+                "status": "pending",
+                "icon": "🟡",
+                "message": f"{len(self.pending_syncs)} sync en attente",
+                "color": ft.Colors.ORANGE
+            }
+        else:
+            return {
+                "status": "online",
+                "icon": "🟢",
+                "message": "Connecté - Tout synchronisé",
+                "color": ft.Colors.GREEN
+            }
+
+# Instance globale
+smart_sync = SmartSyncManager()
+
+# ==================== FONCTION PRINCIPALE ====================
 
 def Saisie_Notes(page, Donner):
     """Saisie des notes par le professeur pour sa matière uniquement"""
     Dialog = ZeliDialog2(page)
     
-    # ✅ IMPORTANT: Déclarer student_list_dialog GLOBALEMENT en haut
     student_list_dialog = None
     
     # Vérifier que c'est bien un prof
@@ -106,20 +241,7 @@ def Saisie_Notes(page, Donner):
     
     def get_matiere_coefficient(matiere_nom):
         """Récupère le coefficient d'une matière"""
-        Etat = Return("etablissement")
-        if not Etat:
-            return "2"
-        
-        con = None
-        try:
-            con = get_db_connection()
-            cur = con.cursor()
-            return "2"
-        except:
-            return "2"
-        finally:
-            if con:
-                con.close()
+        return "2"
     
     def check_note_exists(matricule, matiere, classe):
         """Vérifie si une note existe déjà"""
@@ -128,6 +250,7 @@ def Saisie_Notes(page, Donner):
             con = get_db_connection()
             cur = con.cursor()
             
+            # S'assurer que la table existe avec les bonnes colonnes
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS Notes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,6 +263,8 @@ def Saisie_Notes(page, Donner):
                     note_composition TEXT NOT NULL,
                     moyenne TEXT,
                     date_saisie TEXT,
+                    etablissement TEXT,
+                    updated_at TEXT,
                     UNIQUE(matricule, matiere, classe)
                 )
             """)
@@ -171,10 +296,53 @@ def Saisie_Notes(page, Donner):
         except:
             return "0.00"
     
-    # ✅ DÉPLACER show_students_list ICI (avant create_student_card)
+    def show_sync_status():
+        """Affiche le statut de synchronisation"""
+        status = smart_sync.get_sync_status()
+        
+        status_container = ft.Container(
+            content=ft.Row([
+                ft.Text(status["icon"], size=16),
+                ft.Text(status["message"], size=12, color=status["color"]),
+            ], spacing=5),
+            bgcolor=f"{status['color']}20",
+            padding=8,
+            border_radius=5,
+        )
+        
+        return status_container
+    
+    def force_sync_pending():
+        """Force la synchronisation des données en attente"""
+        if len(smart_sync.pending_syncs) == 0:
+            Dialog.info_toast("Aucune donnée à synchroniser")
+            return
+        
+        loading = Dialog.loading_dialog(
+            title="Synchronisation...",
+            message="Envoi des données vers le serveur"
+        )
+        
+        def do_sync():
+            def update_progress(msg):
+                print(msg)
+            
+            success = smart_sync.execute_pending_syncs(callback=update_progress)
+            
+            Dialog.close_dialog(loading)
+            
+            if success:
+                Dialog.success_toast("Synchronisation réussie !")
+                # Rafraîchir l'affichage
+                Saisie_Notes(page, Donner)
+            else:
+                Dialog.error_toast("Échec de la synchronisation")
+        
+        threading.Thread(target=do_sync, daemon=True).start()
+    
     def show_students_list(classe_nom):
         """Affiche la liste des élèves d'une classe"""
-        nonlocal student_list_dialog  # ✅ Utiliser nonlocal pour modifier la variable
+        nonlocal student_list_dialog
         
         students = load_students_by_class(classe_nom)
         matiere = get_teacher_subject()
@@ -210,6 +378,11 @@ def Saisie_Notes(page, Donner):
         student_list_dialog = Dialog.custom_dialog(
             title=f"📚 {matiere} - Classe {classe_nom}",
             content=ft.Column([
+                # Statut de synchronisation
+                show_sync_status(),
+                
+                ft.Divider(),
+                
                 # Statistiques
                 ft.Container(
                     content=ft.Row([
@@ -260,11 +433,11 @@ def Saisie_Notes(page, Donner):
                         controls=student_cards,
                         scroll=ft.ScrollMode.AUTO,
                     ),
-                    height=350,
+                    height=320,
                 ),
             ],
             width=500,
-            height=500,
+            height=550,
             spacing=10,
             ),
             actions=[
@@ -272,7 +445,13 @@ def Saisie_Notes(page, Donner):
                     "Retour",
                     icon=ft.Icons.ARROW_BACK,
                     on_click=lambda e: back_to_class_selection()
-                )
+                ),
+                ft.IconButton(
+                    icon=ft.Icons.SYNC,
+                    icon_color=ft.Colors.BLUE,
+                    tooltip="Synchroniser maintenant",
+                    on_click=lambda e: force_sync_pending()
+                ) if len(smart_sync.pending_syncs) > 0 else None,
             ]
         )
     
@@ -280,7 +459,6 @@ def Saisie_Notes(page, Donner):
         """Retourne à la sélection de classe"""
         if student_list_dialog:
             Dialog.close_dialog(student_list_dialog)
-        # Recharger la page principale
         Saisie_Notes(page, Donner)
     
     def create_student_card(student, classe_nom, matiere):
@@ -343,9 +521,6 @@ def Saisie_Notes(page, Donner):
             height=70,
             on_click=lambda e, s=student: show_student_notes(s, classe_nom, matiere),
         )
-    
-    # Reste du code (show_student_notes, etc.)
-    # ... [GARDER TOUT LE RESTE DU CODE INCHANGÉ]
     
     def show_student_notes(student, classe_nom, matiere):
         """Affiche le formulaire de saisie/modification des notes"""
@@ -477,52 +652,73 @@ def Saisie_Notes(page, Donner):
                     color=ft.Colors.WHITE,
                     icon=ft.Icons.DELETE_FOREVER,
                     on_click=lambda e: execute_delete_notes(confirm_dialog, parent_dialog, student, classe_nom, matiere)
-                )
+                ),
             ]
         )
     
     def execute_delete_notes(confirm_dialog, parent_dialog, student, classe_nom, matiere):
-        """Exécute la suppression des notes"""
-        con = None
-        try:
-            con = db_manager.get_connection()
-            cur = con.cursor()
-            
-            cur.execute("""
-                DELETE FROM Notes 
-                WHERE matricule = ? AND matiere = ? AND classe = ?
-            """, (student[2], matiere, classe_nom))
-            
-            con.commit()
-            
-            # NOUVEAU : Sync vers Supabase
+        """Exécute la suppression des notes avec sync intelligente"""
+        
+        loading_dialog = Dialog.loading_dialog(
+            title="Suppression en cours...",
+            message="Veuillez patienter",
+            height=100
+        )
+        
+        def do_delete():
+            con = None
             try:
-                from sync_manager import sync_manager
+                con = db_manager.get_connection()
+                cur = con.cursor()
+                
                 # Récupérer établissement
                 cur.execute("SELECT etablissement FROM Students WHERE matricule = ?", (student[2],))
                 result = cur.fetchone()
-                if result:
-                    sync_manager.sync_table_to_supabase(
-                        "Notes",
-                        filter_col="classe",
-                        filter_val=classe_nom
-                    )
-            except Exception as e:
-                Dialog.error_toast(f"⚠️ Erreur sync: {e}")
-            
-            Dialog.info_toast("Notes supprimées avec succès !")
-            Dialog.close_dialog(confirm_dialog)
-            Dialog.close_dialog(parent_dialog)
-            Dialog.close_dialog(student_list_dialog)
-            
-            # Réouvrir la sélection de classe
-            Saisie_Notes(page, Donner)
-            
-        except sqlite3.Error as e:
-            Dialog.error_toast(f"Erreur de suppression: {str(e)}")
-        finally:
-            if con:
+                etablissement = result[0] if result else None
+                
+                # Supprimer local
+                cur.execute("""
+                    DELETE FROM Notes 
+                    WHERE matricule = ? AND matiere = ? AND classe = ?
+                """, (student[2], matiere, classe_nom))
+                
+                con.commit()
                 con.close()
+                
+                # ✅ SYNC INTELLIGENTE
+                if etablissement:
+                    def on_sync_success():
+                        print("✅ Suppression synchronisée en ligne")
+                    
+                    def on_sync_error(msg):
+                        print(f"⚠️ {msg}")
+                    
+                    smart_sync.sync_now(
+                        "Notes",
+                        filter_col="etablissement",
+                        filter_val=etablissement,
+                        callback_success=on_sync_success,
+                        callback_error=on_sync_error
+                    )
+                
+                # Fermer dialogs
+                Dialog.close_dialog(loading_dialog)
+                Dialog.success_toast("Notes supprimées !")
+                Dialog.close_dialog(confirm_dialog)
+                Dialog.close_dialog(parent_dialog)
+                if student_list_dialog:
+                    Dialog.close_dialog(student_list_dialog)
+                
+                # Rafraîchir
+                Saisie_Notes(page, Donner)
+                
+            except Exception as e:
+                Dialog.close_dialog(loading_dialog)
+                Dialog.error_toast(f"Erreur: {str(e)}")
+                if con:
+                    con.close()
+        
+        threading.Thread(target=do_delete, daemon=True).start()
     
     def modify_notes(parent_dialog, student, classe_nom, matiere, existing_note):
         """Ouvre le formulaire de modification des notes"""
@@ -533,8 +729,6 @@ def Saisie_Notes(page, Donner):
         """Affiche le formulaire d'ajout/modification des notes"""
         
         is_modification = existing_note is not None
-        
-        # Récupérer le coefficient
         coefficient = get_matiere_coefficient(matiere)
         
         # Champs de saisie
@@ -598,17 +792,22 @@ def Saisie_Notes(page, Donner):
                 moyenne_display.color = ft.Colors.RED
             page.update()
         
-        # Lier les changements
         interro_field.on_change = update_moyenne
         devoir_field.on_change = update_moyenne
         compo_field.on_change = update_moyenne
         
-        # Calculer la moyenne initiale si modification
         if existing_note:
             update_moyenne(None)
         
+        # Variable pour empêcher double-clic
+        is_saving = [False]
+        
         def validate_and_save(e):
             """Valide et enregistre les notes"""
+            
+            # ✅ Empêcher double-clic
+            if is_saving[0]:
+                return
             
             # Validation
             errors = []
@@ -662,9 +861,12 @@ def Saisie_Notes(page, Donner):
                 page.update()
                 return
             
+            # Marquer comme en cours de sauvegarde
+            is_saving[0] = True
+            
             # Enregistrer
             save_notes(
-                student[2],  # matricule
+                student[2],
                 classe_nom,
                 matiere,
                 coef_field.value,
@@ -675,114 +877,136 @@ def Saisie_Notes(page, Donner):
             )
         
         def save_notes(matricule, classe, matiere, coef, interro, devoir, compo, is_update):
-            """Enregistre les notes dans la base de données"""
-            con = None
-            try:
-                con = db_manager.get_connection()
-                cur = con.cursor()
-                
-                # Calculer la moyenne
-                moyenne = calculate_moyenne(interro, devoir, compo)
-                
-                # Date de saisie
-                from datetime import datetime
-                date_saisie = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                
-                if is_update:
-                    # Mise à jour
-                    cur.execute("""
-                        UPDATE Notes 
-                        SET coefficient = ?,
-                            note_interrogation = ?,
-                            note_devoir = ?,
-                            note_composition = ?,
-                            moyenne = ?,
-                            date_saisie = ?
-                        WHERE matricule = ? AND matiere = ? AND classe = ?
-                    """, (coef, interro, devoir, compo, moyenne, date_saisie, matricule, matiere, classe))
-                    
-                    message = "Notes modifiées avec succès !"
-                else:
-                    # Insertion
-                    cur.execute("""
-                        INSERT INTO Notes 
-                        (classe, matricule, matiere, coefficient, note_interrogation, 
-                         note_devoir, note_composition, moyenne, date_saisie)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (classe, matricule, matiere, coef, interro, devoir, compo, moyenne, date_saisie))
-                    
-                    message = "Notes enregistrées avec succès !"
-                
-                con.commit()
-                
-                # NOUVEAU : Sync vers Supabase
+            """Enregistre les notes avec sync intelligente"""
+            
+            loading_dialog = Dialog.loading_dialog(
+                title="Enregistrement en cours...",
+                message="Veuillez patienter",
+                height=100
+            )
+            
+            def do_save():
+                con = None
                 try:
-                    from sync_manager import sync_manager
-                    # Récupérer établissement depuis Students
+                    con = db_manager.get_connection()
+                    cur = con.cursor()
+                    
+                    # Récupérer établissement
                     cur.execute("SELECT etablissement FROM Students WHERE matricule = ?", (matricule,))
                     result = cur.fetchone()
-                    if result:
-                        sync_manager.sync_table_to_supabase(
-                            "Notes",
-                            filter_col="classe",
-                            filter_val=classe
-                        )
-                except Exception as e:
-                    Dialog.error_toast(f"⚠️ Erreur sync: {e}")
+                    etablissement = result[0] if result else None
                     
-                # Dialog de succès
-                success_dialog = Dialog.custom_dialog(
-                    title="✅ Succès",
-                    content=ft.Column([
-                        ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.GREEN, size=60),
-                        ft.Text(message, size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN),
-                        ft.Divider(),
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Text(f"Élève : {student[0]} {student[1]}", size=14),
-                                ft.Text(f"Matière : {matiere}", size=14),
-                                ft.Text(f"Moyenne obtenue : {moyenne}/20", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.RED),
-                            ]),
-                            bgcolor=ft.Colors.GREEN_50,
-                            padding=15,
-                            border_radius=10,
-                        ),
-                    ],
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=10,
-                    width=400,
-                    height=250,
-                    ),
-                    actions=[
-                        ft.ElevatedButton(
-                            "OK",
-                            bgcolor=ft.Colors.GREEN,
-                            color=ft.Colors.WHITE,
-                            on_click=lambda e: close_all_and_refresh(success_dialog, notes_dialog)
-                        )
-                    ]
-                )
-                
-            except sqlite3.Error as e:
-                Dialog.error_toast(f"Erreur d'enregistrement: {str(e)}")
-            finally:
-                if con:
+                    # Calculer moyenne et dates
+                    moyenne = calculate_moyenne(interro, devoir, compo)
+                    date_saisie = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    updated_at = datetime.now().isoformat()
+                    
+                    if is_update:
+                        cur.execute("""
+                            UPDATE Notes 
+                            SET coefficient = ?,
+                                note_interrogation = ?,
+                                note_devoir = ?,
+                                note_composition = ?,
+                                moyenne = ?,
+                                date_saisie = ?,
+                                updated_at = ?
+                            WHERE matricule = ? AND matiere = ? AND classe = ?
+                        """, (coef, interro, devoir, compo, moyenne, date_saisie, updated_at, matricule, matiere, classe))
+                        message = "Notes modifiées avec succès !"
+                    else:
+                        cur.execute("""
+                            INSERT INTO Notes 
+                            (classe, matricule, matiere, coefficient, note_interrogation, 
+                             note_devoir, note_composition, moyenne, date_saisie, etablissement, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (classe, matricule, matiere, coef, interro, devoir, compo, moyenne, date_saisie, etablissement, updated_at))
+                        message = "Notes enregistrées avec succès !"
+                    
+                    con.commit()
                     con.close()
+                    
+                    # ✅ SYNC INTELLIGENTE
+                    sync_message = ""
+                    if etablissement:
+                        def on_sync_success():
+                            nonlocal sync_message
+                            sync_message = "✅ Synchronisé en ligne"
+                        
+                        def on_sync_error(msg):
+                            nonlocal sync_message
+                            sync_message = f"⚠️ Sauvegardé localement ({msg})"
+                        
+                        smart_sync.sync_now(
+                            "Notes",
+                            filter_col="etablissement",
+                            filter_val=etablissement,
+                            callback_success=on_sync_success,
+                            callback_error=on_sync_error
+                        )
+                    
+                    # Fermer loading
+                    Dialog.close_dialog(loading_dialog)
+                    
+                    # Dialog de succès
+                    success_dialog = Dialog.custom_dialog(
+                        title="✅ Succès",
+                        content=ft.Column([
+                            ft.Icon(ft.Icons.CHECK_CIRCLE, color=ft.Colors.GREEN, size=60),
+                            ft.Text(message, size=18, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN),
+                            ft.Text(sync_message, size=12, italic=True) if sync_message else ft.Container(),
+                            ft.Divider(),
+                            ft.Container(
+                                content=ft.Column([
+                                    ft.Text(f"Élève : {student[0]} {student[1]}", size=14),
+                                    ft.Text(f"Matière : {matiere}", size=14),
+                                    ft.Text(f"Moyenne obtenue : {moyenne}/20", size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.RED),
+                                ]),
+                                bgcolor=ft.Colors.GREEN_50,
+                                padding=15,
+                                border_radius=10,
+                            ),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=10,
+                        width=400,
+                        height=280,
+                        ),
+                        actions=[
+                            ft.ElevatedButton(
+                                "OK",
+                                bgcolor=ft.Colors.GREEN,
+                                color=ft.Colors.WHITE,
+                                on_click=lambda e: close_all_and_refresh(success_dialog, notes_dialog)
+                            )
+                        ]
+                    )
+                    
+                    # Réinitialiser le flag
+                    is_saving[0] = False
+                    
+                except Exception as e:
+                    Dialog.close_dialog(loading_dialog)
+                    Dialog.error_toast(f"Erreur: {str(e)}")
+                    is_saving[0] = False
+                    if con:
+                        con.close()
+            
+            threading.Thread(target=do_save, daemon=True).start()
         
         def close_all_and_refresh(success_dialog, notes_dialog):
             """Ferme tous les dialogs et rafraîchit"""
             Dialog.close_dialog(success_dialog)
             Dialog.close_dialog(notes_dialog)
-            Dialog.close_dialog(student_list_dialog)
-            
-            # Réouvrir la sélection de classe
+            if student_list_dialog:
+                Dialog.close_dialog(student_list_dialog)
             Saisie_Notes(page, Donner)
         
-        # Dialog de saisie des notes
+        # Dialog de saisie
         notes_dialog = Dialog.custom_dialog(
             title=f"📝 {'Modification' if is_modification else 'Saisie'} des notes - {matiere}",
             content=ft.Column([
-                # Informations élève
+                # Infos élève
                 ft.Container(
                     content=ft.Column([
                         ft.Text("Informations de l'élève", size=16, weight=ft.FontWeight.BOLD),
@@ -810,12 +1034,9 @@ def Saisie_Notes(page, Donner):
                 
                 ft.Divider(),
                 
-                # Coefficient
                 coef_field,
-                
                 ft.Divider(),
                 
-                # Notes
                 ft.Text("Saisie des notes", size=16, weight=ft.FontWeight.BOLD),
                 interro_field,
                 devoir_field,
@@ -823,7 +1044,6 @@ def Saisie_Notes(page, Donner):
                 
                 ft.Divider(),
                 
-                # Moyenne
                 ft.Container(
                     content=moyenne_display,
                     bgcolor=ft.Colors.YELLOW_50,
@@ -853,181 +1073,6 @@ def Saisie_Notes(page, Donner):
                 ),
             ]
         )
-    
-    def create_student_card(student, classe_nom, matiere):
-        """Crée une carte pour un élève"""
-        
-        # Vérifier si des notes existent
-        note_exists = check_note_exists(student[2], matiere, classe_nom)
-        
-        status_icon = ft.Icons.CHECK_CIRCLE if note_exists else ft.Icons.ADD_CIRCLE
-        status_color = ft.Colors.GREEN if note_exists else ft.Colors.ORANGE
-        status_text = "Notes saisies" if note_exists else "À saisir"
-        
-        return ft.Container(
-            content=ft.Column([
-                ft.Row([
-                    # Avatar
-                    ft.Container(
-                        content=ft.Text(
-                            student[0][0].upper(),
-                            size=16,
-                            weight=ft.FontWeight.BOLD,
-                            color=ft.Colors.WHITE,
-                        ),
-                        width=40,
-                        height=40,
-                        border_radius=20,
-                        bgcolor=ft.Colors.BLUE_400 if 'M' in str(student[4]) else ft.Colors.PINK_400,
-                        alignment=ft.alignment.center,
-                    ),
-                    
-                    # Infos
-                    ft.Column([
-                        ft.Text(
-                            f"{student[0]} {student[1]}",
-                            size=15,
-                            weight=ft.FontWeight.W_500,
-                        ),
-                        ft.Text(
-                            f"Matricule: {student[2]}",
-                            size=12,
-                            color=ft.Colors.GREY_700,
-                        ),
-                    ], spacing=2, expand=True),
-                    
-                    # Statut
-                    ft.Container(
-                        content=ft.Row([
-                            ft.Icon(status_icon, color=status_color, size=18),
-                            ft.Text(status_text, size=11, color=status_color),
-                        ], spacing=5),
-                        padding=5,
-                        border_radius=5,
-                        bgcolor=f"{status_color}20",
-                    ),
-                ], spacing=10),
-            ]),
-            padding=12,
-            border=ft.border.all(1, ft.Colors.GREY_300),
-            border_radius=10,
-            ink=True,
-            height=70,
-            on_click=lambda e, s=student: show_student_notes(s, classe_nom, matiere),
-        )
-    
-    def show_students_list(classe_nom):
-        """Affiche la liste des élèves d'une classe"""
-        global student_list_dialog
-        
-        students = load_students_by_class(classe_nom)
-        matiere = get_teacher_subject()
-        
-        if not matiere:
-            Dialog.error_toast("Impossible de récupérer votre matière")
-            return
-        
-        # Créer les cartes élèves
-        student_cards = [
-            create_student_card(student, classe_nom, matiere)
-            for student in students
-        ]
-        
-        if not student_cards:
-            student_cards = [
-                ft.Container(
-                    content=ft.Column([
-                        ft.Icon(ft.Icons.PEOPLE, size=60, color=ft.Colors.GREY_400),
-                        ft.Text("Aucun élève dans cette classe", size=16, color=ft.Colors.GREY_600),
-                    ],
-                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                    spacing=10
-                    ),
-                    padding=30
-                )
-            ]
-        
-        # Statistiques
-        total_students = len(students)
-        notes_saisies = sum(1 for s in students if check_note_exists(s[2], matiere, classe_nom))
-        reste = total_students - notes_saisies
-        
-        student_list_dialog = Dialog.custom_dialog(
-            title=f"📚 {matiere} - Classe {classe_nom}",
-            content=ft.Column([
-                # Statistiques
-                ft.Container(
-                    content=ft.Row([
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Text(f"{total_students}", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE),
-                                ft.Text("Élèves", size=12),
-                            ],
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                            ),
-                            padding=10,
-                            expand=True,
-                        ),
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Text(f"{notes_saisies}", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN),
-                                ft.Text("Saisies", size=12),
-                            ],
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                            ),
-                            padding=10,
-                            expand=True,
-                        ),
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Text(f"{reste}", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.ORANGE),
-                                ft.Text("Restantes", size=12),
-                            ],
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
-                            ),
-                            padding=10,
-                            expand=True,
-                        ),
-                    ]),
-                    bgcolor=ft.Colors.BLUE_50,
-                    padding=10,
-                    border_radius=10,
-                ),
-                
-                ft.Divider(),
-                
-                ft.Text("Cliquez sur un élève pour saisir/modifier ses notes", size=12, italic=True, color=ft.Colors.GREY_600),
-                
-                # Liste des élèves
-                ft.Container(
-                    content=ft.Column(
-                        controls=student_cards,
-                        scroll=ft.ScrollMode.AUTO,
-                    ),
-                    height=350,
-                ),
-            ],
-            width=500,
-            height=500,
-            spacing=10,
-            ),
-            actions=[
-                ft.TextButton(
-                    "Retour",
-                    icon=ft.Icons.ARROW_BACK,
-                    on_click=lambda e: back_to_class_selection()
-                )
-            ]
-        )
-    
-    def back_to_class_selection():
-        """Retourne à la sélection de classe"""
-        Dialog.close_dialog(student_list_dialog)
-        Saisie_Notes(page, Donner)
-        
-    # ✅ Ajouter toutes les autres fonctions ici...
-    # (show_existing_notes, modify_notes, show_add_notes_form, etc.)
-    # Je les ai omises pour la clarté, mais gardez-les toutes !
     
     def create_class_card(classe):
         """Crée une carte pour une classe"""
@@ -1107,7 +1152,7 @@ def Saisie_Notes(page, Donner):
             width=220,
             height=220,
             ink=True,
-            on_click=lambda e, c=classe_nom: show_students_list(c),  # ✅ Maintenant ça marche !
+            on_click=lambda e, c=classe_nom: show_students_list(c),
         )
     
     # ==================== DIALOGUE PRINCIPAL ====================
@@ -1122,7 +1167,6 @@ def Saisie_Notes(page, Donner):
         return
     
     classes = load_classes_with_students()
-    
     class_cards = [create_class_card(classe) for classe in classes]
     
     if not class_cards:
@@ -1143,9 +1187,34 @@ def Saisie_Notes(page, Donner):
             )
         ]
     
+    # Boutons d'actions
+    action_buttons = [
+        ft.TextButton(
+            "Fermer",
+            icon=ft.Icons.CLOSE,
+            on_click=lambda e: Dialog.close_dialog(main_dialog)
+        )
+    ]
+    
+    # Ajouter bouton de sync si nécessaire
+    if len(smart_sync.pending_syncs) > 0:
+        action_buttons.insert(0, ft.ElevatedButton(
+            f"Synchroniser ({len(smart_sync.pending_syncs)})",
+            icon=ft.Icons.CLOUD_UPLOAD,
+            bgcolor=ft.Colors.ORANGE,
+            color=ft.Colors.WHITE,
+            on_click=lambda e: force_sync_pending()
+        ))
+    
     main_dialog = Dialog.custom_dialog(
         title=f"📝 Saisie des notes - {teacher_subject}",
         content=ft.Column([
+            # Statut de connexion
+            show_sync_status(),
+            
+            ft.Divider(),
+            
+            # Infos prof
             ft.Container(
                 content=ft.Column([
                     ft.Row([
@@ -1182,6 +1251,7 @@ def Saisie_Notes(page, Donner):
             
             ft.Container(height=5),
             
+            # Grille des classes
             ft.Container(
                 content=ft.GridView(
                     controls=class_cards,
@@ -1191,19 +1261,13 @@ def Saisie_Notes(page, Donner):
                     spacing=10,
                     run_spacing=10,
                 ),
-                height=350,
+                height=320,
             ),
         ],
         width=550,
-        height=500,
+        height=550,
         spacing=10,
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
         ),
-        actions=[
-            ft.TextButton(
-                "Fermer",
-                icon=ft.Icons.CLOSE,
-                on_click=lambda e: Dialog.close_dialog(main_dialog)
-            )
-        ]
+        actions=action_buttons
     )
