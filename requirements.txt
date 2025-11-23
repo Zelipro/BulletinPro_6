@@ -1,4 +1,25 @@
-flet>=0.23.0
-python-dotenv>=1.0.0
-supabase>=2.0.0
-pyinstaller>=6.0.0
+# ================================
+# BULLETINPRO - REQUIREMENTS
+# ================================
+
+# Core Framework
+flet[all]>=0.24.0
+flet-core>=0.24.0
+flet-runtime>=0.24.0
+
+# PDF Generation
+#fpdf2==2.8.1
+
+# Database & Cloud Backend
+supabase==2.9.0
+postgrest==0.17.0
+python-dotenv==1.0.1
+
+# Image Processing
+Pillow==10.4.0
+
+# Build Tools
+pyinstaller==6.11.0
+
+# Utilities
+requests==2.31.0
