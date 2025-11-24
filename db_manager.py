@@ -96,10 +96,27 @@ def get_db_connection():
     return db_manager.get_connection()
 
 
+def check_and_add_column(cursor, table_name, column_name, column_type, default_value=None):
+    """Vérifie si une colonne existe et l'ajoute si nécessaire"""
+    try:
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        if column_name not in columns:
+            default_clause = f" DEFAULT {default_value}" if default_value else ""
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}{default_clause}")
+            print(f"✅ Colonne '{column_name}' ajoutée à {table_name}")
+            return True
+        return False
+    except Exception as e:
+        print(f"⚠️ Erreur ajout colonne {column_name} à {table_name}: {e}")
+        return False
+
+
 def init_all_tables():
     """
     Initialise toutes les tables avec la structure Supabase
-    Compatible SQLite
+    Compatible SQLite avec auto-migration
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -148,11 +165,15 @@ def init_all_tables():
                 nom TEXT NOT NULL,
                 genre TEXT NOT NULL,
                 etablissement TEXT NOT NULL,
+                coefficient TEXT DEFAULT '2',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 UNIQUE(nom, etablissement)
             )
         """)
+        
+        # ✅ Ajouter colonne coefficient si manquante
+        check_and_add_column(cursor, 'Matieres', 'coefficient', 'TEXT', "'2'")
         
         # Table Teacher
         cursor.execute("""
@@ -168,6 +189,7 @@ def init_all_tables():
         # Table Notes
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS Notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 classe TEXT NOT NULL,
                 matricule TEXT NOT NULL,
                 matiere TEXT NOT NULL,
@@ -177,6 +199,7 @@ def init_all_tables():
                 note_composition TEXT NOT NULL,
                 moyenne TEXT,
                 date_saisie TEXT,
+                etablissement TEXT,
                 periode TEXT DEFAULT 'Premier Trimestre',
                 statut TEXT DEFAULT 'en_cours',
                 date_verrouillage TIMESTAMP,
@@ -185,6 +208,12 @@ def init_all_tables():
                 UNIQUE(matricule, matiere, classe)
             )
         """)
+        
+        # ✅ Ajouter colonnes manquantes à Notes
+        check_and_add_column(cursor, 'Notes', 'etablissement', 'TEXT')
+        check_and_add_column(cursor, 'Notes', 'periode', 'TEXT', "'Premier Trimestre'")
+        check_and_add_column(cursor, 'Notes', 'statut', 'TEXT', "'en_cours'")
+        check_and_add_column(cursor, 'Notes', 'date_verrouillage', 'TIMESTAMP')
         
         # Index pour Notes
         cursor.execute("""
@@ -230,6 +259,8 @@ def init_all_tables():
         
     except Exception as e:
         print(f"❌ Erreur initialisation tables: {e}")
+        import traceback
+        traceback.print_exc()
         conn.rollback()
         raise
     finally:
