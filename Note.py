@@ -241,7 +241,29 @@ def Saisie_Notes(page, Donner):
     
     def get_matiere_coefficient(matiere_nom):
         """Récupère le coefficient d'une matière"""
-        return "2"
+        Etat = Return("etablissement")
+        if not Etat:
+            return "2"
+        
+        con = None
+        try:
+            con = get_db_connection()
+            cur = con.cursor()
+            # Chercher le coefficient dans la table Matieres
+            cur.execute("""
+                SELECT coefficient FROM Matieres 
+                WHERE nom = ? AND etablissement = ?
+            """, (matiere_nom, Etat[0][0]))
+            result = cur.fetchone()
+            if result and result[0]:
+                return str(result[0])
+            return "2"
+        except Exception as e:
+            print(f"⚠️ Erreur récupération coefficient: {e}")
+            return "2"
+        finally:
+            if con:
+                con.close()
     
     def check_note_exists(matricule, matiere, classe):
         """Vérifie si une note existe déjà"""
@@ -250,7 +272,7 @@ def Saisie_Notes(page, Donner):
             con = get_db_connection()
             cur = con.cursor()
             
-            # S'assurer que la table existe avec les bonnes colonnes
+            # S'assurer que la table existe AVEC etablissement
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS Notes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -270,6 +292,14 @@ def Saisie_Notes(page, Donner):
             """)
             con.commit()
             
+            # Vérifier si la colonne etablissement existe, sinon l'ajouter
+            cur.execute("PRAGMA table_info(Notes)")
+            columns = [col[1] for col in cur.fetchall()]
+            if 'etablissement' not in columns:
+                cur.execute("ALTER TABLE Notes ADD COLUMN etablissement TEXT")
+                con.commit()
+                print("✅ Colonne 'etablissement' ajoutée à la table Notes")
+            
             cur.execute("""
                 SELECT * FROM Notes 
                 WHERE matricule = ? AND matiere = ? AND classe = ?
@@ -278,7 +308,8 @@ def Saisie_Notes(page, Donner):
             result = cur.fetchone()
             return result
             
-        except:
+        except Exception as e:
+            print(f"❌ Erreur check_note_exists: {e}")
             return None
         finally:
             if con:
@@ -344,6 +375,10 @@ def Saisie_Notes(page, Donner):
         """Affiche la liste des élèves d'une classe"""
         nonlocal student_list_dialog
         
+        # Fermer le dialog principal d'abord
+        if main_dialog:
+            Dialog.close_dialog(main_dialog)
+        
         students = load_students_by_class(classe_nom)
         matiere = get_teacher_subject()
         
@@ -351,10 +386,17 @@ def Saisie_Notes(page, Donner):
             Dialog.error_toast("Impossible de récupérer votre matière")
             return
         
+        print(f"📚 Chargement de {len(students)} élèves pour la classe {classe_nom}")
+        
         # Créer les cartes élèves
         student_cards = []
         for student in students:
-            student_cards.append(create_student_card(student, classe_nom, matiere))
+            try:
+                student_cards.append(create_student_card(student, classe_nom, matiere))
+            except Exception as e:
+                print(f"❌ Erreur création carte élève: {e}")
+                print(f"❌ Erreur création carte élève: {e}")
+                continue
         
         if not student_cards:
             student_cards = [
@@ -375,85 +417,95 @@ def Saisie_Notes(page, Donner):
         notes_saisies = sum(1 for s in students if check_note_exists(s[2], matiere, classe_nom))
         reste = total_students - notes_saisies
         
-        student_list_dialog = Dialog.custom_dialog(
-            title=f"📚 {matiere} - Classe {classe_nom}",
-            content=ft.Column([
-                # Statut de synchronisation
-                show_sync_status(),
-                
-                ft.Divider(),
-                
-                # Statistiques
-                ft.Container(
-                    content=ft.Row([
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Text(f"{total_students}", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE),
-                                ft.Text("Élèves", size=12),
-                            ],
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        print(f"📊 Stats: {total_students} élèves, {notes_saisies} notes saisies, {reste} restantes")
+        
+        try:
+            student_list_dialog = Dialog.custom_dialog(
+                title=f"📚 {matiere} - Classe {classe_nom}",
+                content=ft.Column([
+                    # Statut de synchronisation
+                    show_sync_status(),
+                    
+                    ft.Divider(),
+                    
+                    # Statistiques
+                    ft.Container(
+                        content=ft.Row([
+                            ft.Container(
+                                content=ft.Column([
+                                    ft.Text(f"{total_students}", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.BLUE),
+                                    ft.Text("Élèves", size=12),
+                                ],
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                ),
+                                padding=10,
+                                expand=True,
                             ),
-                            padding=10,
-                            expand=True,
-                        ),
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Text(f"{notes_saisies}", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN),
-                                ft.Text("Saisies", size=12),
-                            ],
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            ft.Container(
+                                content=ft.Column([
+                                    ft.Text(f"{notes_saisies}", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN),
+                                    ft.Text("Saisies", size=12),
+                                ],
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                ),
+                                padding=10,
+                                expand=True,
                             ),
-                            padding=10,
-                            expand=True,
-                        ),
-                        ft.Container(
-                            content=ft.Column([
-                                ft.Text(f"{reste}", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.ORANGE),
-                                ft.Text("Restantes", size=12),
-                            ],
-                            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                            ft.Container(
+                                content=ft.Column([
+                                    ft.Text(f"{reste}", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.ORANGE),
+                                    ft.Text("Restantes", size=12),
+                                ],
+                                horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                                ),
+                                padding=10,
+                                expand=True,
                             ),
-                            padding=10,
-                            expand=True,
-                        ),
-                    ]),
-                    bgcolor=ft.Colors.BLUE_50,
-                    padding=10,
-                    border_radius=10,
-                ),
-                
-                ft.Divider(),
-                
-                ft.Text("Cliquez sur un élève pour saisir/modifier ses notes", 
-                       size=12, italic=True, color=ft.Colors.GREY_600),
-                
-                # Liste des élèves
-                ft.Container(
-                    content=ft.Column(
-                        controls=student_cards,
-                        scroll=ft.ScrollMode.AUTO,
+                        ]),
+                        bgcolor=ft.Colors.BLUE_50,
+                        padding=10,
+                        border_radius=10,
                     ),
-                    height=320,
+                    
+                    ft.Divider(),
+                    
+                    ft.Text("Cliquez sur un élève pour saisir/modifier ses notes", 
+                           size=12, italic=True, color=ft.Colors.GREY_600),
+                    
+                    # Liste des élèves
+                    ft.Container(
+                        content=ft.Column(
+                            controls=student_cards,
+                            scroll=ft.ScrollMode.AUTO,
+                        ),
+                        height=320,
+                    ),
+                ],
+                width=500,
+                height=550,
+                spacing=10,
                 ),
-            ],
-            width=500,
-            height=550,
-            spacing=10,
-            ),
-            actions=[
-                ft.TextButton(
-                    "Retour",
-                    icon=ft.Icons.ARROW_BACK,
-                    on_click=lambda e: back_to_class_selection()
-                ),
-                ft.IconButton(
-                    icon=ft.Icons.SYNC,
-                    icon_color=ft.Colors.BLUE,
-                    tooltip="Synchroniser maintenant",
-                    on_click=lambda e: force_sync_pending()
-                ) if len(smart_sync.pending_syncs) > 0 else None,
-            ]
-        )
+                actions=[
+                    ft.TextButton(
+                        "Retour",
+                        icon=ft.Icons.ARROW_BACK,
+                        on_click=lambda e: back_to_class_selection()
+                    ),
+                ] + ([
+                    ft.IconButton(
+                        icon=ft.Icons.SYNC,
+                        icon_color=ft.Colors.BLUE,
+                        tooltip="Synchroniser maintenant",
+                        on_click=lambda e: force_sync_pending()
+                    )
+                ] if len(smart_sync.pending_syncs) > 0 else [])
+            )
+            print("✅ Dialog élèves créé avec succès")
+        except Exception as e:
+            print(f"❌ Erreur création dialog élèves: {e}")
+            import traceback
+            traceback.print_exc()
+            Dialog.error_toast(f"Erreur d'affichage: {str(e)}")
     
     def back_to_class_selection():
         """Retourne à la sélection de classe"""
@@ -671,10 +723,12 @@ def Saisie_Notes(page, Donner):
                 con = db_manager.get_connection()
                 cur = con.cursor()
                 
-                # Récupérer établissement
-                cur.execute("SELECT etablissement FROM Students WHERE matricule = ?", (student[2],))
-                result = cur.fetchone()
-                etablissement = result[0] if result else None
+                # 🎯 RÉCUPÉRER L'ÉTABLISSEMENT DU PROF CONNECTÉ
+                etablissement = None
+                Etat = Return("etablissement")
+                if Etat and len(Etat) > 0:
+                    etablissement = Etat[0][0]
+                    print(f"✅ Établissement du prof: {etablissement}")
                 
                 # Supprimer local
                 cur.execute("""
@@ -685,14 +739,14 @@ def Saisie_Notes(page, Donner):
                 con.commit()
                 con.close()
                 
-                # ✅ SYNC INTELLIGENTE
+                # ✅ SYNC INTELLIGENTE AVEC FILTRE SUR ÉTABLISSEMENT
+                def on_sync_success():
+                    print("✅ Suppression synchronisée en ligne")
+                
+                def on_sync_error(msg):
+                    print(f"⚠️ {msg}")
+                
                 if etablissement:
-                    def on_sync_success():
-                        print("✅ Suppression synchronisée en ligne")
-                    
-                    def on_sync_error(msg):
-                        print(f"⚠️ {msg}")
-                    
                     smart_sync.sync_now(
                         "Notes",
                         filter_col="etablissement",
@@ -700,6 +754,8 @@ def Saisie_Notes(page, Donner):
                         callback_success=on_sync_success,
                         callback_error=on_sync_error
                     )
+                else:
+                    print("⚠️ Sync impossible (établissement manquant)")
                 
                 # Fermer dialogs
                 Dialog.close_dialog(loading_dialog)
@@ -715,6 +771,9 @@ def Saisie_Notes(page, Donner):
             except Exception as e:
                 Dialog.close_dialog(loading_dialog)
                 Dialog.error_toast(f"Erreur: {str(e)}")
+                print(f"❌ Erreur suppression: {e}")
+                import traceback
+                traceback.print_exc()
                 if con:
                     con.close()
         
@@ -891,10 +950,14 @@ def Saisie_Notes(page, Donner):
                     con = db_manager.get_connection()
                     cur = con.cursor()
                     
-                    # Récupérer établissement
-                    cur.execute("SELECT etablissement FROM Students WHERE matricule = ?", (matricule,))
-                    result = cur.fetchone()
-                    etablissement = result[0] if result else None
+                    # 🎯 RÉCUPÉRER L'ÉTABLISSEMENT DU PROF CONNECTÉ
+                    etablissement = None
+                    Etat = Return("etablissement")
+                    if Etat and len(Etat) > 0:
+                        etablissement = Etat[0][0]
+                        print(f"✅ Établissement du prof: {etablissement}")
+                    else:
+                        print("⚠️ Impossible de récupérer l'établissement du prof")
                     
                     # Calculer moyenne et dates
                     moyenne = calculate_moyenne(interro, devoir, compo)
@@ -910,9 +973,10 @@ def Saisie_Notes(page, Donner):
                                 note_composition = ?,
                                 moyenne = ?,
                                 date_saisie = ?,
+                                etablissement = ?,
                                 updated_at = ?
                             WHERE matricule = ? AND matiere = ? AND classe = ?
-                        """, (coef, interro, devoir, compo, moyenne, date_saisie, updated_at, matricule, matiere, classe))
+                        """, (coef, interro, devoir, compo, moyenne, date_saisie, etablissement, updated_at, matricule, matiere, classe))
                         message = "Notes modifiées avec succès !"
                     else:
                         cur.execute("""
@@ -926,17 +990,18 @@ def Saisie_Notes(page, Donner):
                     con.commit()
                     con.close()
                     
-                    # ✅ SYNC INTELLIGENTE
+                    # ✅ SYNC INTELLIGENTE AVEC FILTRE SUR ÉTABLISSEMENT
                     sync_message = ""
+                    
+                    def on_sync_success():
+                        nonlocal sync_message
+                        sync_message = "✅ Synchronisé en ligne"
+                    
+                    def on_sync_error(msg):
+                        nonlocal sync_message
+                        sync_message = f"⚠️ Sauvegardé localement ({msg})"
+                    
                     if etablissement:
-                        def on_sync_success():
-                            nonlocal sync_message
-                            sync_message = "✅ Synchronisé en ligne"
-                        
-                        def on_sync_error(msg):
-                            nonlocal sync_message
-                            sync_message = f"⚠️ Sauvegardé localement ({msg})"
-                        
                         smart_sync.sync_now(
                             "Notes",
                             filter_col="etablissement",
@@ -944,6 +1009,8 @@ def Saisie_Notes(page, Donner):
                             callback_success=on_sync_success,
                             callback_error=on_sync_error
                         )
+                    else:
+                        sync_message = "⚠️ Sync impossible (établissement manquant)"
                     
                     # Fermer loading
                     Dialog.close_dialog(loading_dialog)
@@ -988,6 +1055,9 @@ def Saisie_Notes(page, Donner):
                 except Exception as e:
                     Dialog.close_dialog(loading_dialog)
                     Dialog.error_toast(f"Erreur: {str(e)}")
+                    print(f"❌ Erreur sauvegarde: {e}")
+                    import traceback
+                    traceback.print_exc()
                     is_saving[0] = False
                     if con:
                         con.close()
@@ -1093,8 +1163,8 @@ def Saisie_Notes(page, Donner):
                 """, (classe_nom, matiere))
                 result = cur.fetchone()
                 notes_count = result[0] if result else 0
-            except:
-                pass
+            except Exception as e:
+                print(f"❌ Erreur comptage notes: {e}")
             finally:
                 if con:
                     con.close()
@@ -1107,6 +1177,17 @@ def Saisie_Notes(page, Donner):
             progress_color = ft.Colors.ORANGE
         else:
             progress_color = ft.Colors.RED
+        
+        def on_class_click(e):
+            """Gestion du clic sur une classe"""
+            print(f"🖱️ Clic sur classe: {classe_nom}")
+            try:
+                show_students_list(classe_nom)
+            except Exception as error:
+                print(f"❌ Erreur lors du clic: {error}")
+                import traceback
+                traceback.print_exc()
+                Dialog.error_toast(f"Erreur: {str(error)}")
         
         return ft.Container(
             content=ft.Column([
@@ -1152,7 +1233,7 @@ def Saisie_Notes(page, Donner):
             width=220,
             height=220,
             ink=True,
-            on_click=lambda e, c=classe_nom: show_students_list(c),
+            on_click=on_class_click,
         )
     
     # ==================== DIALOGUE PRINCIPAL ====================
@@ -1166,8 +1247,21 @@ def Saisie_Notes(page, Donner):
         )
         return
     
+    print(f"📘 Matière du professeur: {teacher_subject}")
+    
     classes = load_classes_with_students()
-    class_cards = [create_class_card(classe) for classe in classes]
+    print(f"📚 Classes chargées: {len(classes)}")
+    
+    class_cards = []
+    for classe in classes:
+        try:
+            card = create_class_card(classe)
+            class_cards.append(card)
+            print(f"✅ Carte créée pour classe: {classe[0]}")
+        except Exception as e:
+            print(f"❌ Erreur création carte classe {classe[0]}: {e}")
+            import traceback
+            traceback.print_exc()
     
     if not class_cards:
         class_cards = [
@@ -1187,7 +1281,7 @@ def Saisie_Notes(page, Donner):
             )
         ]
     
-    # Boutons d'actions
+    # Boutons d'actions - Ne jamais mettre None dans la liste !
     action_buttons = [
         ft.TextButton(
             "Fermer",
